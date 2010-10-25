@@ -203,7 +203,43 @@ static LJ_AINLINE void *CALL_MMAP(size_t size)
 
 /* FreeBSD 64 bit kernel ignores mmap() hints for lower 32GB of memory. */
 /* See: grep -C15 RLIMIT_DATA /usr/src/sys/vm/vm_mmap.c */
-#error "No support for 64 bit FreeBSD"
+/* Fix this by dropping the data segment limit. */
+
+#include <sys/types.h>
+#include <sys/resource.h>
+
+#include <err.h>
+#include <unistd.h>
+
+static int mmap_rlimit_ok;
+
+#define MMAP_REGION_START	((uintptr_t)0x10000000)
+#define MMAP_REGION_END		((uintptr_t)0x80000000)
+
+static LJ_AINLINE void *CALL_MMAP(size_t size)
+{
+  if (!mmap_rlimit_ok) {
+    struct rlimit rlim;
+    if (getrlimit(RLIMIT_DATA, &rlim) < 0) {
+      warn("getrlimit");
+      return CMFAIL;
+    }
+    uintptr_t top = (uintptr_t)sbrk(0);
+    uintptr_t lim = MMAP_REGION_START - top;
+    rlim.rlim_cur = rlim.rlim_max = lim;
+    if (setrlimit(RLIMIT_DATA, &rlim) < 0) {
+      warn("setrlimit");
+      return CMFAIL;
+    }
+    mmap_rlimit_ok = 1;
+  }
+  void *p = mmap(NULL, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
+  if ((uintptr_t)p + size >= MMAP_REGION_END) {
+    munmap(p, size);
+    return CMFAIL;
+  }
+  return p;
+}
 
 #else
 
