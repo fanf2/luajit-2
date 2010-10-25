@@ -253,6 +253,9 @@ else
   ifeq (GNU/kFreeBSD,$(TARGET_SYS))
     TARGET_XLIBS+= -ldl
   endif
+  ifeq (FreeBSD,$(TARGET_SYS))
+    TARGET_XCFLAGS+= -I.
+  endif
 endif
 endif
 
