@@ -534,7 +534,7 @@ static void *err_unwind(lua_State *L, void *stopcf, int errcode)
 
 #if defined(__GNUC__)
 
-#include <unwind.h>
+#include "unwind.h"
 
 #define LJ_UEXCLASS		0x4c55414a49543200ULL	/* LUAJIT2\0 */
 #define LJ_UEXCLASS_MAKE(c)	(LJ_UEXCLASS | (_Unwind_Exception_Class)(c))
