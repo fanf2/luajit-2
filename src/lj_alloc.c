@@ -163,6 +163,10 @@ static LJ_AINLINE int CALL_MUNMAP(void *ptr, size_t size)
 #endif
 #define MMAP_FLAGS		(MAP_PRIVATE|MAP_ANONYMOUS)
 
+#define INIT_MMAP()		((void)0)
+#define DIRECT_MMAP(s)		CALL_MMAP(s)
+#define CALL_MUNMAP(a, s)	munmap((a), (s))
+
 #if LJ_64
 /* 64 bit mode needs special support for allocating memory in the lower 2GB. */
 
@@ -211,34 +215,37 @@ static LJ_AINLINE void *CALL_MMAP(size_t size)
 #include <err.h>
 #include <unistd.h>
 
-static int mmap_rlimit_ok;
-
 #define MMAP_REGION_START	((uintptr_t)0x10000000)
 #define MMAP_REGION_END		((uintptr_t)0x80000000)
 
+#undef INIT_MMAP
+
+static void INIT_MMAP(void)
+{
+  struct rlimit rlim;
+  rlim.rlim_cur = rlim.rlim_max = MMAP_REGION_START;
+  setrlimit(RLIMIT_DATA, &rlim);
+}
+
 static LJ_AINLINE void *CALL_MMAP(size_t size)
 {
-  if (!mmap_rlimit_ok) {
-    struct rlimit rlim;
-    if (getrlimit(RLIMIT_DATA, &rlim) < 0) {
-      warn("getrlimit");
-      return CMFAIL;
-    }
-    uintptr_t top = (uintptr_t)sbrk(0);
-    uintptr_t lim = MMAP_REGION_START - top;
-    rlim.rlim_cur = rlim.rlim_max = lim;
-    if (setrlimit(RLIMIT_DATA, &rlim) < 0) {
-      warn("setrlimit");
-      return CMFAIL;
-    }
-    mmap_rlimit_ok = 1;
-  }
   void *p = mmap(NULL, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
-  if ((uintptr_t)p + size >= MMAP_REGION_END) {
+  if ((uintptr_t)p + size < MMAP_REGION_END) {
+    warnx("take %p + %lu", p, size);
+    return p;
+  } else {
+    warnx("fail %p + %lu", p, size);
     munmap(p, size);
     return CMFAIL;
   }
-  return p;
+}
+
+#undef CALL_MUNMAP
+
+static int CALL_MUNMAP(void *p, size_t size)
+{
+  warnx("free %p + %lu", p, size);
+  return munmap(p, size);
 }
 
 #else
@@ -253,10 +260,6 @@ static LJ_AINLINE void *CALL_MMAP(size_t size)
 #define CALL_MMAP(s)		mmap(NULL, (s), MMAP_PROT, MMAP_FLAGS, -1, 0)
 
 #endif
-
-#define INIT_MMAP()		((void)0)
-#define DIRECT_MMAP(s)		CALL_MMAP(s)
-#define CALL_MUNMAP(a, s)	munmap((a), (s))
 
 #ifdef __linux__
 /* Need to define _GNU_SOURCE to get the mremap prototype. */
