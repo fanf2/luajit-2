@@ -228,7 +228,7 @@ static LJ_AINLINE void *CALL_MMAP(size_t size)
 #include <err.h>
 
 #define MMAP_REGION_START	((uintptr_t)0x10000000)
-#define MMAP_REGION_END		((uintptr_t)0x80000000)
+#define MMAP_REGION_END		((uintptr_t)0x100000000)
 
 #undef INIT_MMAP
 
