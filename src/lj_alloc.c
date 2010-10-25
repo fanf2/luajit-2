@@ -172,8 +172,22 @@ static LJ_AINLINE int CALL_MUNMAP(void *ptr, size_t size)
 
 #if defined(__linux__)
 
-/* Actually this only gives us max. 1GB in current Linux kernels. */
-#define CALL_MMAP(s)	mmap(NULL, (s), MMAP_PROT, MAP_32BIT|MMAP_FLAGS, -1, 0)
+#include <err.h>
+
+static LJ_AINLINE void *CALL_MMAP(size_t size)
+{
+  void *p = mmap(NULL, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
+  warnx("take %p + %lu", p, size);
+  return p;
+}
+
+#undef CALL_MUNMAP
+
+static int CALL_MUNMAP(void *p, size_t size)
+{
+  warnx("free %p + %lu", p, size);
+  return munmap(p, size);
+}
 
 #elif defined(__MACH__) && defined(__APPLE__)
 
@@ -209,11 +223,9 @@ static LJ_AINLINE void *CALL_MMAP(size_t size)
 /* See: grep -C15 RLIMIT_DATA /usr/src/sys/vm/vm_mmap.c */
 /* Fix this by dropping the data segment limit. */
 
-#include <sys/types.h>
 #include <sys/resource.h>
 
 #include <err.h>
-#include <unistd.h>
 
 #define MMAP_REGION_START	((uintptr_t)0x10000000)
 #define MMAP_REGION_END		((uintptr_t)0x80000000)
@@ -257,7 +269,24 @@ static int CALL_MUNMAP(void *p, size_t size)
 #else
 
 /* 32 bit mode is easy. */
-#define CALL_MMAP(s)		mmap(NULL, (s), MMAP_PROT, MMAP_FLAGS, -1, 0)
+// #define CALL_MMAP(s)		mmap(NULL, (s), MMAP_PROT, MMAP_FLAGS, -1, 0)
+
+#include <err.h>
+
+static LJ_AINLINE void *CALL_MMAP(size_t size)
+{
+  void *p = mmap(NULL, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
+  warnx("take %p + %u", p, size);
+  return p;
+}
+
+#undef CALL_MUNMAP
+
+static int CALL_MUNMAP(void *p, size_t size)
+{
+  warnx("free %p + %u", p, size);
+  return munmap(p, size);
+}
 
 #endif
 
