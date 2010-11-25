@@ -1242,6 +1242,15 @@ static void fs_init(LexState *ls, FuncState *fs)
 
 /* -- Expressions --------------------------------------------------------- */
 
+/* Manage syntactic levels to avoid blowing up the stack. */
+static void synlevel_begin(LexState *ls)
+{
+  if (++ls->level >= LJ_MAX_XLEVEL)
+    lj_lex_error(ls, 0, LJ_ERR_XLEVELS);
+}
+
+#define synlevel_end(ls)	((ls)->level--)
+
 /* Forward declaration. */
 static void expr(LexState *ls, ExpDesc *v);
 
@@ -1396,26 +1405,22 @@ static BCReg parse_params(LexState *ls, int needself)
 {
   FuncState *fs = ls->fs;
   BCReg nparams = 0;
-  lex_check(ls, '(');
   if (needself)
     var_new_lit(ls, nparams++, "self");
-  if (ls->token != ')') {
-    do {
-      if (ls->token == TK_name) {
-	var_new(ls, nparams++, lex_str(ls));
-      } else if (ls->token == TK_dots) {
-	lj_lex_next(ls);
-	fs->flags |= PROTO_IS_VARARG;
-	break;
-      } else {
-	err_syntax(ls, LJ_ERR_XPARAM);
-      }
-    } while (lex_opt(ls, ','));
-  }
+  do {
+    if (ls->token == TK_name) {
+      var_new(ls, nparams++, lex_str(ls));
+    } else if (ls->token == TK_dots) {
+      lj_lex_next(ls);
+      fs->flags |= PROTO_IS_VARARG;
+      break;
+    } else if (nparams > 0) {
+      err_syntax(ls, LJ_ERR_XPARAM);
+    }
+  } while (lex_opt(ls, ','));
   var_add(ls, nparams);
   lua_assert(fs->nactvar == nparams);
   bcreg_reserve(fs, nparams);
-  lex_check(ls, ')');
   return nparams;
 }
 
@@ -1427,19 +1432,89 @@ static void parse_body(LexState *ls, ExpDesc *e, int needself, BCLine line)
 {
   FuncState fs, *pfs = ls->fs;
   BCReg kidx;
-  BCLine lastline;
   GCproto *pt;
   ptrdiff_t oldbase = pfs->bcbase - ls->bcstack;
   fs_init(ls, &fs);
   fs.linedefined = line;
+  lex_check(ls, '(');
   fs.numparams = (uint8_t)parse_params(ls, needself);
+  lex_check(ls, ')');
   fs.bcbase = pfs->bcbase + pfs->pc;
   fs.bclim = pfs->bclim - pfs->pc;
   bcemit_AD(&fs, BC_FUNCF, 0, 0);  /* Placeholder. */
   parse_chunk(ls);
-  lastline = ls->linenumber;
   lex_match(ls, TK_end, TK_function, line);
-  pt = fs_finish(ls, lastline);
+  pt = fs_finish(ls, ls->linenumber);
+  pfs->bcbase = ls->bcstack + oldbase;  /* May have been reallocated. */
+  pfs->bclim = (BCPos)(ls->sizebcstack - oldbase);
+  /* Store new prototype in the constant array of the parent. */
+  kidx = const_gc(pfs, obj2gco(pt), LJ_TPROTO);
+  expr_init(e, VRELOCABLE, bcemit_AD(pfs, BC_FNEW, 0, kidx));
+  if (!(pfs->flags & PROTO_HAS_FNEW)) {
+    if (pfs->flags & PROTO_HAS_RETURN)
+      pfs->flags |= PROTO_FIXUP_RETURN;
+    pfs->flags |= PROTO_HAS_FNEW;
+  }
+}
+
+/* Forward declarations. */
+static void parse_return(LexState *ls);
+static void parse_if(LexState *ls, BCLine line);
+static void parse_for(LexState *ls, BCLine line);
+static void parse_while(LexState *ls, BCLine line);
+static void parse_repeat(LexState *ls, BCLine line);
+
+/* Parse a lambda expression */
+static void expr_lambda(LexState *ls, ExpDesc *e)
+{
+  FuncState fs, *pfs = ls->fs;
+  BCReg kidx;
+  GCproto *pt;
+  ExpDesc r;
+  ptrdiff_t oldbase = pfs->bcbase - ls->bcstack;
+  fs_init(ls, &fs);
+  fs.linedefined = ls->linenumber;
+  lex_check(ls, '\\');
+  fs.numparams = (uint8_t)parse_params(ls, 0);
+  fs.bcbase = pfs->bcbase + pfs->pc;
+  fs.bclim = pfs->bclim - pfs->pc;
+  bcemit_AD(&fs, BC_FUNCF, 0, 0);  /* Placeholder. */
+  switch (ls->token) {
+  case '\\':  /* Nested lambda. */
+    synlevel_begin(ls);
+    expr_lambda(ls, &r);
+    synlevel_end(ls);
+    /* Return one value - see parse_return() */
+    if (fs.flags & PROTO_HAS_FNEW)
+      bcemit_AJ(&fs, BC_UCLO, 0, 0);
+    bcemit_INS(&fs, BCINS_AD(BC_RET1, expr_toanyreg(&fs, &r), 2));
+    break;
+  case '(':  /* Return expression list. */
+    parse_return(ls);
+    lex_match(ls, ')', '(', fs.linedefined);
+    break;
+  case TK_do:
+    lj_lex_next(ls);
+    parse_chunk(ls);
+    lex_match(ls, TK_end, TK_function, fs.linedefined);
+    break;
+  case TK_if:
+    parse_if(ls, fs.linedefined);
+    break;
+  case TK_for:
+    parse_for(ls, fs.linedefined);
+    break;
+  case TK_while:
+    parse_while(ls, fs.linedefined);
+    break;
+  case TK_repeat:
+    parse_repeat(ls, fs.linedefined);
+    lex_match(ls, TK_end, TK_repeat, fs.linedefined); /* weird */
+    break;
+  default:
+    err_syntax(ls, LJ_ERR_XLAMBDA);
+  }
+  pt = fs_finish(ls, ls->linenumber);
   pfs->bcbase = ls->bcstack + oldbase;  /* May have been reallocated. */
   pfs->bclim = (BCPos)(ls->sizebcstack - oldbase);
   /* Store new prototype in the constant array of the parent. */
@@ -1487,6 +1562,8 @@ static void parse_args(LexState *ls, ExpDesc *e)
     lex_match(ls, ')', '(', line);
   } else if (ls->token == '{') {
     expr_table(ls, &args);
+  } else if (ls->token == '\\') {
+    expr_lambda(ls, &args);
   } else if (ls->token == TK_string) {
     expr_init(&args, VKSTR, 0);
     args.u.sval = strV(&ls->tokenval);
@@ -1540,7 +1617,8 @@ static void expr_primary(LexState *ls, ExpDesc *v)
       expr_str(ls, &key);
       bcemit_method(fs, v, &key);
       parse_args(ls, v);
-    } else if (ls->token == '(' || ls->token == TK_string || ls->token == '{') {
+    } else if (ls->token == '(' || ls->token == TK_string ||
+               ls->token == '{' || ls->token == '\\') {
       expr_tonextreg(fs, v);
       parse_args(ls, v);
     } else {
@@ -1583,6 +1661,9 @@ static void expr_simple(LexState *ls, ExpDesc *v)
   case '{':  /* Table constructor. */
     expr_table(ls, v);
     return;
+  case '\\':
+    expr_lambda(ls, v);
+    return;
   case TK_function:
     lj_lex_next(ls);
     parse_body(ls, v, 0, ls->linenumber);
@@ -1593,15 +1674,6 @@ static void expr_simple(LexState *ls, ExpDesc *v)
   }
   lj_lex_next(ls);
 }
-
-/* Manage syntactic levels to avoid blowing up the stack. */
-static void synlevel_begin(LexState *ls)
-{
-  if (++ls->level >= LJ_MAX_XLEVEL)
-    lj_lex_error(ls, 0, LJ_ERR_XLEVELS);
-}
-
-#define synlevel_end(ls)	((ls)->level--)
 
 /* Convert token to binary operator. */
 static BinOpr token2binop(LexToken tok)
@@ -1782,10 +1854,10 @@ static void parse_return(LexState *ls)
 {
   BCIns ins;
   FuncState *fs = ls->fs;
-  lj_lex_next(ls);  /* Skip 'return'. */
+  lj_lex_next(ls);  /* Skip 'return' or '('. */
   fs->flags |= PROTO_HAS_RETURN;
-  if (endofblock(ls->token) || ls->token == ';') {  /* Bare return. */
-    ins = BCINS_AD(BC_RET0, 0, 1);
+  if (endofblock(ls->token) || ls->token == ';' || ls->token == ')') {
+    ins = BCINS_AD(BC_RET0, 0, 1);  /* Bare return. */
   } else {  /* Return with one or more values. */
     ExpDesc e;  /* Receives the _last_ expression in the list. */
     BCReg nret = expr_list(ls, &e);

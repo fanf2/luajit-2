@@ -136,6 +136,8 @@ ERRDEF(XDOTS,	"cannot use " LUA_QL("...") " outside a vararg function")
 ERRDEF(XSYNTAX,	"syntax error")
 ERRDEF(XBREAK,	"no loop to break")
 ERRDEF(XFOR,	LUA_QL("=") " or " LUA_QL("in") " expected")
+ERRDEF(XLAMBDA,	"expected lambda body starting with "
+		LUA_QL("(") " or " LUA_QL("\\") " or block statement")
 
 #undef ERRDEF
 
