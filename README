@@ -14,3 +14,6 @@ Please point your favorite browser to:
 
  doc/luajit.html
 
+This version includes support for lambda expressions
+added by Tony Finch <dot@dotat.at>.
+
