@@ -410,6 +410,12 @@ enum {
 #define setvmstate(g, st)	((g)->vmstate = ~LJ_VMST_##st)
 
 /* Metamethods. */
+#ifdef LUAJIT_ENABLE_LUA52COMPAT
+#define MMDEF_52(_) _(pairs) _(ipairs)
+#else
+#define MMDEF_52(_)
+#endif
+
 #define MMDEF(_) \
   _(index) _(newindex) _(gc) _(mode) _(eq) \
   /* Only the above (fast) metamethods are negative cached (max. 8). */ \
@@ -417,7 +423,7 @@ enum {
   /* The following must be in ORDER ARITH. */ \
   _(add) _(sub) _(mul) _(div) _(mod) _(pow) _(unm) \
   /* The following are used in the standard libraries. */ \
-  _(metatable) _(tostring)
+  _(metatable) _(tostring) MMDEF_52(_)
 
 typedef enum {
 #define MMENUM(name)	MM_##name,
@@ -719,7 +725,7 @@ static LJ_AINLINE int32_t lj_num2bit(lua_Number n)
   return (int32_t)o.u32.lo;
 }
 
-#if (defined(__i386__) || defined(_M_IX86)) && !defined(__SSE2__)
+#if LJ_TARGET_X86 && !defined(__SSE2__)
 #define lj_num2int(n)   lj_num2bit((n))
 #else
 #define lj_num2int(n)   ((int32_t)(n))

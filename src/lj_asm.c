@@ -1345,7 +1345,7 @@ static void asm_gencall(ASMState *as, const CCallInfo *ci, IRRef *args)
   for (n = 0; n < nargs; n++) {  /* Setup args. */
     IRIns *ir = IR(args[n]);
     Reg r;
-#if LJ_64 && defined(_WIN64)
+#if LJ_64 && LJ_ABI_WIN
     /* Windows/x64 argument registers are strictly positional. */
     r = irt_isnum(ir->t) ? (fpr <= REGARG_LASTFPR ? fpr : 0) : (gprs & 31);
     fpr++; gprs >>= 5;
@@ -1614,11 +1614,13 @@ static MCode *merge_href_niltv(ASMState *as, IRIns *ir)
   /* Assumes nothing else generates NE of HREF. */
   if ((ir[1].o == IR_NE || ir[1].o == IR_EQ) && ir[1].op1 == as->curins &&
       ra_hasreg(ir->r)) {
-    if (LJ_64 && *as->mcp != XI_ARITHi)
-      as->mcp += 7+6;
-    else
-      as->mcp += 6+6;  /* Kill cmp reg, imm32 + jz exit. */
-    return as->mcp + *(int32_t *)(as->mcp-4);  /* Return exit address. */
+    MCode *p = as->mcp;
+    p += (LJ_64 && *p != XI_ARITHi) ? 7+6 : 6+6;
+    /* Ensure no loop branch inversion happened. */
+    if (p[-6] == 0x0f && p[-5] == XI_JCCn+(CC_NE^(ir[1].o & 1))) {
+      as->mcp = p;  /* Kill cmp reg, imm32 + jz exit. */
+      return p + *(int32_t *)(p-4);  /* Return exit address. */
+    }
   }
   return NULL;
 }
@@ -3516,11 +3518,7 @@ static void asm_setup_regsp(ASMState *as, GCtrace *T)
       const CCallInfo *ci = &lj_ir_callinfo[ir->op2];
 #if LJ_64
       /* NYI: add stack slots for x64 calls with many args. */
-#ifdef _WIN64
-      lua_assert(CCI_NARGS(ci) <= 4);
-#else
-      lua_assert(CCI_NARGS(ci) <= 6);  /* Safe lower bound. */
-#endif
+      lua_assert(CCI_NARGS(ci) <= (LJ_ABI_WIN ? 4 : 6));
       ir->prev = REGSP_HINT(irt_isnum(ir->t) ? RID_FPRET : RID_RET);
 #else
       /* NYI: not fastcall-aware, but doesn't matter (yet). */

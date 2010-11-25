@@ -72,7 +72,7 @@
 
 #define IS_DIRECT_BIT		(SIZE_T_ONE)
 
-#ifdef LUA_USE_WIN
+#if LJ_TARGET_WINDOWS
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -163,38 +163,27 @@ static LJ_AINLINE int CALL_MUNMAP(void *ptr, size_t size)
 #endif
 #define MMAP_FLAGS		(MAP_PRIVATE|MAP_ANONYMOUS)
 
-#define INIT_MMAP()		((void)0)
-#define DIRECT_MMAP(s)		CALL_MMAP(s)
-#define CALL_MUNMAP(a, s)	munmap((a), (s))
-
 #if LJ_64
 /* 64 bit mode needs special support for allocating memory in the lower 2GB. */
 
-#if defined(__linux__)
+#if LJ_TARGET_LINUX
 
-#include <err.h>
+/* Actually this only gives us max. 1GB in current Linux kernels. */
+#define CALL_MMAP(s)	mmap(NULL, (s), MMAP_PROT, MAP_32BIT|MMAP_FLAGS, -1, 0)
 
-static LJ_AINLINE void *CALL_MMAP(size_t size)
-{
-  void *p = mmap(NULL, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
-  warnx("take %p + %lu", p, size);
-  return p;
-}
+#elif LJ_TARGET_OSX || defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
 
-#undef CALL_MUNMAP
-
-static int CALL_MUNMAP(void *p, size_t size)
-{
-  warnx("free %p + %lu", p, size);
-  return munmap(p, size);
-}
-
-#elif defined(__MACH__) && defined(__APPLE__)
-
-/* OSX mmap() uses a naive first-fit linear search. That's perfect for us.
-** But -pagezero_size must be set, otherwise the lower 4GB are blocked.
+/* OSX and FreeBSD mmap() use a naive first-fit linear search.
+** That's perfect for us. Except that -pagezero_size must be set for OSX,
+** otherwise the lower 4GB are blocked. And the 32GB RLIMIT_DATA needs
+** to be reduced to 250MB on FreeBSD.
 */
+#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+#include <sys/resource.h>
+#define MMAP_REGION_START	((uintptr_t)0x10000000)
+#else
 #define MMAP_REGION_START	((uintptr_t)0x10000)
+#endif
 #define MMAP_REGION_END		((uintptr_t)0x80000000)
 
 static LJ_AINLINE void *CALL_MMAP(size_t size)
@@ -202,6 +191,15 @@ static LJ_AINLINE void *CALL_MMAP(size_t size)
   /* Hint for next allocation. Doesn't need to be thread-safe. */
   static uintptr_t alloc_hint = MMAP_REGION_START;
   int retry = 0;
+#if defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
+  static int rlimit_modified = 0;
+  if (LJ_UNLIKELY(rlimit_modified == 0)) {
+    struct rlimit rlim;
+    rlim.rlim_cur = rlim.rlim_max = MMAP_REGION_START;
+    setrlimit(RLIMIT_DATA, &rlim);  /* Ignore result. May fail below. */
+    rlimit_modified = 1;
+  }
+#endif
   for (;;) {
     void *p = mmap((void *)alloc_hint, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
     if ((uintptr_t)p >= MMAP_REGION_START &&
@@ -217,49 +215,6 @@ static LJ_AINLINE void *CALL_MMAP(size_t size)
   return CMFAIL;
 }
 
-#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__)
-
-/* FreeBSD 64 bit kernel ignores mmap() hints for lower 32GB of memory. */
-/* See: grep -C15 RLIMIT_DATA /usr/src/sys/vm/vm_mmap.c */
-/* Fix this by dropping the data segment limit. */
-
-#include <sys/resource.h>
-
-#include <err.h>
-
-#define MMAP_REGION_START	((uintptr_t)0x10000000)
-#define MMAP_REGION_END		((uintptr_t)0x100000000)
-
-#undef INIT_MMAP
-
-static void INIT_MMAP(void)
-{
-  struct rlimit rlim;
-  rlim.rlim_cur = rlim.rlim_max = MMAP_REGION_START;
-  setrlimit(RLIMIT_DATA, &rlim);
-}
-
-static LJ_AINLINE void *CALL_MMAP(size_t size)
-{
-  void *p = mmap(NULL, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
-  if ((uintptr_t)p + size < MMAP_REGION_END) {
-    warnx("take %p + %lu", p, size);
-    return p;
-  } else {
-    warnx("fail %p + %lu", p, size);
-    munmap(p, size);
-    return CMFAIL;
-  }
-}
-
-#undef CALL_MUNMAP
-
-static int CALL_MUNMAP(void *p, size_t size)
-{
-  warnx("free %p + %lu", p, size);
-  return munmap(p, size);
-}
-
 #else
 
 #error "NYI: need an equivalent of MAP_32BIT for this 64 bit OS"
@@ -269,28 +224,15 @@ static int CALL_MUNMAP(void *p, size_t size)
 #else
 
 /* 32 bit mode is easy. */
-// #define CALL_MMAP(s)		mmap(NULL, (s), MMAP_PROT, MMAP_FLAGS, -1, 0)
-
-#include <err.h>
-
-static LJ_AINLINE void *CALL_MMAP(size_t size)
-{
-  void *p = mmap(NULL, size, MMAP_PROT, MMAP_FLAGS, -1, 0);
-  warnx("take %p + %u", p, size);
-  return p;
-}
-
-#undef CALL_MUNMAP
-
-static int CALL_MUNMAP(void *p, size_t size)
-{
-  warnx("free %p + %u", p, size);
-  return munmap(p, size);
-}
+#define CALL_MMAP(s)		mmap(NULL, (s), MMAP_PROT, MMAP_FLAGS, -1, 0)
 
 #endif
 
-#ifdef __linux__
+#define INIT_MMAP()		((void)0)
+#define DIRECT_MMAP(s)		CALL_MMAP(s)
+#define CALL_MUNMAP(a, s)	munmap((a), (s))
+
+#if LJ_TARGET_LINUX
 /* Need to define _GNU_SOURCE to get the mremap prototype. */
 #define CALL_MREMAP(addr, osz, nsz, mv) mremap((addr), (osz), (nsz), (mv))
 #define CALL_MREMAP_NOMOVE	0
@@ -477,7 +419,7 @@ typedef struct malloc_state *mstate;
   (((S) + (DEFAULT_GRANULARITY - SIZE_T_ONE))\
    & ~(DEFAULT_GRANULARITY - SIZE_T_ONE))
 
-#ifdef LUA_USE_WIN
+#if LJ_TARGET_WINDOWS
 #define mmap_align(S)	granularity_align(S)
 #else
 #define mmap_align(S)	page_align(S)

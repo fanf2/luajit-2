@@ -15,7 +15,7 @@
 #include "lj_str.h"
 #include "lj_lex.h"
 #include "lj_parse.h"
-#include "lj_ctype.h"
+#include "lj_char.h"
 
 /* Lua lexer token names. */
 static const char *const tokennames[] = {
@@ -46,16 +46,22 @@ static int fillbuf(LexState *ls)
   return char2int(*(ls->p++));
 }
 
-static void save(LexState *ls, int c)
+static LJ_NOINLINE void save_grow(LexState *ls, int c)
 {
-  if (ls->sb.n + 1 > ls->sb.sz) {
-    MSize newsize;
-    if (ls->sb.sz >= LJ_MAX_STR/2)
-      lj_lex_error(ls, 0, LJ_ERR_XELEM);
-    newsize = ls->sb.sz * 2;
-    lj_str_resizebuf(ls->L, &ls->sb, newsize);
-  }
-  ls->sb.buf[ls->sb.n++] = cast(char, c);
+  MSize newsize;
+  if (ls->sb.sz >= LJ_MAX_STR/2)
+    lj_lex_error(ls, 0, LJ_ERR_XELEM);
+  newsize = ls->sb.sz * 2;
+  lj_str_resizebuf(ls->L, &ls->sb, newsize);
+  ls->sb.buf[ls->sb.n++] = (char)c;
+}
+
+static LJ_AINLINE void save(LexState *ls, int c)
+{
+  if (LJ_UNLIKELY(ls->sb.n + 1 > ls->sb.sz))
+    save_grow(ls, c);
+  else
+    ls->sb.buf[ls->sb.n++] = (char)c;
 }
 
 static void inclinenumber(LexState *ls)
@@ -73,18 +79,14 @@ static void inclinenumber(LexState *ls)
 
 static void read_numeral(LexState *ls, TValue *tv)
 {
-  lua_assert(lj_ctype_isdigit(ls->current));
+  int c;
+  lua_assert(lj_char_isdigit(ls->current));
   do {
+    c = ls->current;
     save_and_next(ls);
-  } while (lj_ctype_isdigit(ls->current) || ls->current == '.');
-  if (ls->current == 'e' || ls->current == 'E' ||
-      ls->current == 'p' || ls->current == 'P') {
-    save_and_next(ls);
-    if (ls->current == '+' || ls->current == '-')
-      save_and_next(ls);
-  }
-  while (lj_ctype_isident(ls->current))
-    save_and_next(ls);
+  } while (lj_char_isident(ls->current) || ls->current == '.' ||
+	   ((ls->current == '-' || ls->current == '+') &&
+	    ((c & ~0x20) == 'E' || (c & ~0x20) == 'P')));
   save(ls, '\0');
   if (!lj_str_numconv(ls->sb.buf, tv))
     lj_lex_error(ls, TK_number, LJ_ERR_XNUMBER);
@@ -152,7 +154,7 @@ static void read_string(LexState *ls, int delim, TValue *tv)
       continue;
     case '\\': {
       int c;
-      next(ls);  /* do not save the `\' */
+      next(ls);  /* Skip the '\\'. */
       switch (ls->current) {
       case 'a': c = '\a'; break;
       case 'b': c = '\b'; break;
@@ -161,20 +163,41 @@ static void read_string(LexState *ls, int delim, TValue *tv)
       case 'r': c = '\r'; break;
       case 't': c = '\t'; break;
       case 'v': c = '\v'; break;
+      case 'x':  /* Hexadecimal escape '\xXX'. */
+	c = (next(ls) & 15u) << 4;
+	if (!lj_char_isdigit(ls->current)) {
+	  if (!lj_char_isxdigit(ls->current)) goto err_xesc;
+	  c += 9 << 4;
+	}
+	c += (next(ls) & 15u);
+	if (!lj_char_isdigit(ls->current)) {
+	  if (!lj_char_isxdigit(ls->current)) goto err_xesc;
+	  c += 9;
+	}
+	break;
+      case '*':  /* Skip whitespace. */
+	next(ls);
+	while (lj_char_isspace(ls->current))
+	  if (currIsNewline(ls)) inclinenumber(ls); else next(ls);
+	continue;
       case '\n': case '\r': save(ls, '\n'); inclinenumber(ls); continue;
-      case END_OF_STREAM: continue;  /* will raise an error next loop */
+      case END_OF_STREAM: continue;
       default:
-	if (!lj_ctype_isdigit(ls->current)) {
-	  save_and_next(ls);  /* handles \\, \", \', and \? */
-	} else {  /* \xxx */
-	  int i = 0;
-	  c = 0;
-	  do {
-	    c = 10*c + (ls->current-'0');
-	    next(ls);
-	  } while (++i<3 && lj_ctype_isdigit(ls->current));
-	  if (c > UCHAR_MAX)
-	    lj_lex_error(ls, TK_string, LJ_ERR_XESC);
+	if (!lj_char_isdigit(ls->current)) {
+	  save_and_next(ls);  /* Handles '\\', '\"' and "\'". */
+	} else {  /* Decimal escape '\ddd'. */
+	  c = (ls->current - '0');
+	  if (lj_char_isdigit(next(ls))) {
+	    c = c*10 + (ls->current - '0');
+	    if (lj_char_isdigit(next(ls))) {
+	      c = c*10 + (ls->current - '0');
+	      if (c > 255) {
+	      err_xesc:
+		lj_lex_error(ls, TK_string, LJ_ERR_XESC);
+	      }
+	      next(ls);
+	    }
+	  }
 	  save(ls, c);
 	}
 	continue;
@@ -198,16 +221,16 @@ static int llex(LexState *ls, TValue *tv)
 {
   lj_str_resetbuf(&ls->sb);
   for (;;) {
-    if (lj_ctype_isident(ls->current)) {
+    if (lj_char_isident(ls->current)) {
       GCstr *s;
-      if (lj_ctype_isdigit(ls->current)) {  /* Numeric literal. */
+      if (lj_char_isdigit(ls->current)) {  /* Numeric literal. */
 	read_numeral(ls, tv);
 	return TK_number;
       }
       /* Identifier or reserved word. */
       do {
 	save_and_next(ls);
-      } while (lj_ctype_isident(ls->current));
+      } while (lj_char_isident(ls->current));
       s = lj_parse_keepstr(ls, ls->sb.buf, ls->sb.n);
       if (s->reserved > 0)  /* Reserved word? */
 	return TK_OFS + s->reserved;
@@ -280,7 +303,7 @@ static int llex(LexState *ls, TValue *tv)
 	  return TK_dots;   /* ... */
 	}
 	return TK_concat;   /* .. */
-      } else if (!lj_ctype_isdigit(ls->current)) {
+      } else if (!lj_char_isdigit(ls->current)) {
 	return '.';
       } else {
 	read_numeral(ls, tv);
@@ -367,7 +390,7 @@ const char *lj_lex_token2str(LexState *ls, LexToken token)
 {
   if (token > TK_OFS)
     return tokennames[token-TK_OFS-1];
-  else if (!lj_ctype_iscntrl(token))
+  else if (!lj_char_iscntrl(token))
     return lj_str_pushf(ls->L, "%c", token);
   else
     return lj_str_pushf(ls->L, "char(%d)", token);

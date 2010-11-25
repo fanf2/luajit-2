@@ -25,7 +25,7 @@
 #include "lj_bc.h"
 #include "lj_ff.h"
 #include "lj_dispatch.h"
-#include "lj_ctype.h"
+#include "lj_char.h"
 #include "lj_lib.h"
 
 /* -- Base library: checks ------------------------------------------------ */
@@ -197,7 +197,7 @@ LJLIB_ASM(tonumber)		LJLIB_REC(.)
       lj_err_arg(L, 2, LJ_ERR_BASERNG);
     ul = strtoul(p, &ep, base);
     if (p != ep) {
-      while (lj_ctype_isspace((unsigned char)(*ep))) ep++;
+      while (lj_char_isspace((unsigned char)(*ep))) ep++;
       if (*ep == '\0') {
 	setnumV(L->base-1, cast_num(ul));
 	return FFH_RES(1);
@@ -246,17 +246,47 @@ LJ_STATIC_ASSERT((int)FF_next == FF_next_N);
 LJLIB_ASM(next)
 {
   lj_lib_checktab(L, 1);
-  lj_lib_checknum(L, 2);  /* For ipairs_aux. */
+  return FFH_UNREACHABLE;
+}
+
+#ifdef LUAJIT_ENABLE_LUA52COMPAT
+static int ffh_pairs(lua_State *L, MMS mm)
+{
+  TValue *o = lj_lib_checkany(L, 1);
+  cTValue *mo = lj_meta_lookup(L, o, mm);
+  if (!tvisnil(mo)) {
+    L->top = o+1;  /* Only keep one argument. */
+    copyTV(L, L->base-1, mo);  /* Replace callable. */
+    return FFH_TAILCALL;
+  } else {
+    if (!tvistab(o)) lj_err_argt(L, 1, LUA_TTABLE);
+    setfuncV(L, o-1, funcV(lj_lib_upvalue(L, 1)));
+    if (mm == MM_pairs) setnilV(o+1); else setintV(o+1, 0);
+    return FFH_RES(3);
+  }
+}
+#else
+#define ffh_pairs(L, mm)	(lj_lib_checktab(L, 1), FFH_UNREACHABLE)
+#endif
+
+LJLIB_PUSH(lastcl)
+LJLIB_ASM(pairs)
+{
+  return ffh_pairs(L, MM_pairs);
+}
+
+LJLIB_NOREGUV LJLIB_ASM(ipairs_aux)	LJLIB_REC(.)
+{
+  lj_lib_checktab(L, 1);
+  lj_lib_checknum(L, 2);
   return FFH_UNREACHABLE;
 }
 
 LJLIB_PUSH(lastcl)
-LJLIB_ASM_(pairs)
-
-LJLIB_NOREGUV LJLIB_ASM_(ipairs_aux)	LJLIB_REC(.)
-
-LJLIB_PUSH(lastcl)
-LJLIB_ASM_(ipairs)		LJLIB_REC(.)
+LJLIB_ASM(ipairs)		LJLIB_REC(.)
+{
+  return ffh_pairs(L, MM_ipairs);
+}
 
 /* -- Base library: throw and catch errors -------------------------------- */
 
@@ -479,8 +509,8 @@ LJLIB_CF(coroutine_running)
 LJLIB_CF(coroutine_create)
 {
   lua_State *L1 = lua_newthread(L);
-  if (!(L->top > L->base && tvisfunc(L->base) && isluafunc(funcV(L->base))))
-    lj_err_arg(L, 1, LJ_ERR_NOLFUNC);
+  if (!(L->base < L->top && tvisfunc(L->base)))
+    lj_err_argt(L, 1, LUA_TFUNCTION);
   setfuncV(L, L1->top++, funcV(L->base));
   return 1;
 }

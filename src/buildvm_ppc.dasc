@@ -1098,8 +1098,16 @@ static void build_subroutines(BuildCtx *ctx)
   |  checktab TAB:CARG1
   |   lwz PC, FRAME_PC(BASE)
   |  checkfail ->fff_fallback
+#ifdef LUAJIT_ENABLE_LUA52COMPAT
+  |   lwz TAB:TMP2, TAB:CARG1->metatable
+  |  evldd CFUNC:TMP0, CFUNC:RB->upvalue[0]
+  |   cmplwi TAB:TMP2, 0
+  |  la RA, -8(BASE)
+  |   bne ->fff_fallback
+#else
   |  evldd CFUNC:TMP0, CFUNC:RB->upvalue[0]
   |  la RA, -8(BASE)
+#endif
   |   evstdd TAB:CARG1, 0(BASE)
   |   evstdd TISNIL, 8(BASE)
   |  li RD, (3+1)*8
@@ -1150,8 +1158,16 @@ static void build_subroutines(BuildCtx *ctx)
   |  checktab TAB:CARG1
   |   lwz PC, FRAME_PC(BASE)
   |  checkfail ->fff_fallback
+#ifdef LUAJIT_ENABLE_LUA52COMPAT
+  |   lwz TAB:TMP2, TAB:CARG1->metatable
+  |  evldd CFUNC:TMP0, CFUNC:RB->upvalue[0]
+  |   cmplwi TAB:TMP2, 0
+  |  la RA, -8(BASE)
+  |   bne ->fff_fallback
+#else
   |  evldd CFUNC:TMP0, CFUNC:RB->upvalue[0]
   |  la RA, -8(BASE)
+#endif
   |    evsplati TMP1, 0
   |   evstdd TAB:CARG1, 0(BASE)
   |    evstdd TMP1, 8(BASE)
@@ -1681,8 +1697,8 @@ static void build_subroutines(BuildCtx *ctx)
   |  b <1
   |.endmacro
   |
-  |ffstring_case string_lower, 0x41
-  |ffstring_case string_upper, 0x61
+  |ffstring_case string_lower, 65
+  |ffstring_case string_upper, 97
   |
   |//-- Table library ------------------------------------------------------
   |
