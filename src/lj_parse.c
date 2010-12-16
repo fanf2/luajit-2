@@ -1414,7 +1414,7 @@ static BCReg parse_params(LexState *ls, int needself)
       lj_lex_next(ls);
       fs->flags |= PROTO_IS_VARARG;
       break;
-    } else if (nparams > 0) {
+    } else if (nparams > needself) {
       err_syntax(ls, LJ_ERR_XPARAM);
     }
   } while (lex_opt(ls, ','));
