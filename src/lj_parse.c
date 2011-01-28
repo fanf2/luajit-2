@@ -601,9 +601,12 @@ static void bcemit_method(FuncState *fs, ExpDesc *e, ExpDesc *key)
   expr_free(fs, e);
   func = fs->freereg;
   bcemit_AD(fs, BC_MOV, func+1, obj);  /* Copy object to first argument. */
-  lua_assert(expr_isstrk(key));
-  idx = const_str(fs, key);
-  if (idx <= BCMAX_C) {
+  if (!expr_isstrk(key)) {
+    bcreg_reserve(fs, 3);
+    expr_toreg(fs, key, func+2);
+    bcemit_ABC(fs, BC_TGETV, func, obj, func+2);
+    fs->freereg--;
+  } else if ((idx = const_str(fs, key)) < BCMAX_C) {
     bcreg_reserve(fs, 2);
     bcemit_ABC(fs, BC_TGETS, func, obj, idx);
   } else {
@@ -1614,7 +1617,11 @@ static void expr_primary(LexState *ls, ExpDesc *v)
     } else if (ls->token == ':') {
       ExpDesc key;
       lj_lex_next(ls);
-      expr_str(ls, &key);
+      expr_toanyreg(fs, v);
+      if (ls->token == '[')
+        expr_bracket(ls, &key);
+      else
+        expr_str(ls, &key);
       bcemit_method(fs, v, &key);
       parse_args(ls, v);
     } else if (ls->token == '(' || ls->token == TK_string ||
